@@ -30,6 +30,104 @@ def _select_unique_top_ideas(ranked_ideas: list[ResearchIdea], limit: int = 3) -
     return selected
 
 
+def _apply_human_idea_preference(
+    *,
+    brief: ResearchBrief,
+    top_ideas: list[ResearchIdea],
+    selection: str,
+) -> tuple[ResearchBrief, list[ResearchIdea]]:
+    if not selection:
+        return brief, top_ideas
+    if selection == "__synthesize__":
+        return brief.model_copy(update={"preferred_idea_id": "synthesize"}), top_ideas
+    matching = [idea for idea in top_ideas if idea.idea_id == selection]
+    if not matching:
+        return brief.model_copy(update={"human_idea_feedback": selection}), top_ideas
+    selected = matching[0]
+    reordered = [selected, *[idea for idea in top_ideas if idea.idea_id != selected.idea_id]]
+    return brief.model_copy(update={"preferred_idea_id": selected.idea_id}), reordered
+
+
+def _collect_human_guidance(
+    *,
+    brief: ResearchBrief,
+    top_ideas: list[ResearchIdea],
+    observer,
+) -> tuple[ResearchBrief, list[ResearchIdea]]:
+    if observer is None or not hasattr(observer, "select_option"):
+        return brief, top_ideas
+    if not top_ideas:
+        return brief, top_ideas
+
+    idea_options = [
+        {
+            "label": f"{idx}. {idea.title[:48]}",
+            "value": idea.idea_id,
+            "description": f"Use this candidate as the main proposal direction. Score: {idea.total_score:.2f}",
+        }
+        for idx, idea in enumerate(top_ideas, start=1)
+    ]
+    idea_options.append(
+        {
+            "label": "Synthesize",
+            "value": "__synthesize__",
+            "description": "Let EvoResearcher blend the ranked ideas.",
+        }
+    )
+    selection = observer.select_option(
+        title="Human Guidance: Candidate Direction",
+        prompt=(
+            "I have ranked the candidate ideas. Which direction should anchor the final report? "
+            "This choice will reorder the proposal inputs, so the selected idea becomes the primary direction."
+        ),
+        options=idea_options,
+        custom_prompt="Describe the direction or constraint you want the report to follow.",
+        question_index=1,
+        total_questions=2,
+        selected_answers=[],
+    )
+    brief, top_ideas = _apply_human_idea_preference(
+        brief=brief,
+        top_ideas=top_ideas,
+        selection=selection,
+    )
+
+    emphasis = observer.select_option(
+        title="Human Guidance: Report Emphasis",
+        prompt=(
+            "What should the final proposal emphasize? This will be written into the brief and used by the "
+            "proposal agent when choosing framing, risk discussion, and evaluation details."
+        ),
+        options=[
+            {
+                "label": "Novelty",
+                "value": "Emphasize novelty and how this differs from prior work.",
+                "description": "Lead with originality and research contribution.",
+            },
+            {
+                "label": "Feasibility",
+                "value": "Emphasize feasibility, implementation details, and a practical validation plan.",
+                "description": "Make the proposal executable.",
+            },
+            {
+                "label": "Evidence",
+                "value": "Emphasize evidence grounding, sources, and assumptions.",
+                "description": "Prioritize support from retrieved evidence.",
+            },
+            {
+                "label": "Risks",
+                "value": "Emphasize risks, limitations, and mitigation strategies.",
+                "description": "Make tradeoffs explicit.",
+            },
+        ],
+        custom_prompt="Describe the emphasis you want in the final report.",
+        question_index=2,
+        total_questions=2,
+        selected_answers=[f"Candidate preference: {selection}"],
+    )
+    return brief.model_copy(update={"report_emphasis": emphasis}), top_ideas
+
+
 def build_graph(
     *,
     config: AppConfig,
@@ -61,7 +159,13 @@ def build_graph(
             observer.agent_state("research", "done", f"{len(result.idea_tree)} nodes, {len(result.elo_matches)} Elo matches")
             if hasattr(observer, "ideas_ready"):
                 observer.ideas_ready(top_ideas)
+        brief, top_ideas = _collect_human_guidance(
+            brief=brief,
+            top_ideas=top_ideas,
+            observer=observer,
+        )
         return {
+            "brief": brief.model_dump(),
             "sources": [item.model_dump() for item in result.sources],
             "memory_context": result.memory_context,
             "idea_tree": [item.model_dump() for item in result.idea_tree],

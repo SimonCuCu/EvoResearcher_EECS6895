@@ -1,6 +1,8 @@
 import os
 from pathlib import Path
 
+import pytest
+
 from evoresearcher.agents.evolution_memory_agent import EvolutionMemoryAgent
 from evoresearcher.agents.intake_agent import IntakeAgent
 from evoresearcher.agents.proposal_agent import ProposalAgent
@@ -14,15 +16,19 @@ from evoresearcher.orchestration.graph import build_graph
 def build_config(tmp_path: Path) -> AppConfig:
     api_key = os.environ.get("DEEPSEEK_API_KEY")
     if not api_key:
-        raise RuntimeError("DEEPSEEK_API_KEY must be set for live integration tests.")
+        pytest.skip("DEEPSEEK_API_KEY must be exported for live integration tests.")
     return AppConfig(
         workspace_dir=tmp_path,
         outputs_dir=tmp_path / "outputs",
         memory_dir=tmp_path / "memory",
         author_line="Test",
         deepseek_api_key=api_key,
-        deepseek_model="deepseek-chat",
-        deepseek_base_url="https://api.deepseek.com/chat/completions",
+        deepseek_model=os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"),
+        deepseek_base_url=os.environ.get(
+            "DEEPSEEK_BASE_URL",
+            "https://api.deepseek.com/chat/completions",
+        ),
+        deepseek_reasoning_model=os.environ.get("DEEPSEEK_REASONING_MODEL", "deepseek-v4-pro"),
         search_enabled=False,
     )
 

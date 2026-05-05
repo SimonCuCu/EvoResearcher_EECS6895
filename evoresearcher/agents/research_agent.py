@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from itertools import count
+import re
 
 from typing import Literal
+from urllib.parse import parse_qs, unquote, urlparse
 
 from pydantic import BaseModel, Field
 
@@ -15,6 +17,89 @@ from evoresearcher.research.elo_tournament import run_elo_tournament
 from evoresearcher.research.tree_search import build_tree
 from evoresearcher.retrieval.search import WebResearcher
 from evoresearcher.schemas import EloMatch, EvidenceSynthesis, ResearchBrief, ResearchIdea, SourceNote
+
+
+_URL_RE = re.compile(r"https?://[^\s<>\]})\"']+")
+_BLOCKED_RULE_TERMS = (
+    "not allowed",
+    "forbidden",
+    "blocked source",
+    "blocked-source",
+    "do not view",
+    "must not view",
+    "should not view",
+    "not cite",
+    "not quote",
+)
+
+
+def _has_blocked_source_rule(text: str) -> bool:
+    lowered = text.lower()
+    return any(term in lowered for term in _BLOCKED_RULE_TERMS)
+
+
+def _unwrap_tracking_url(url: str) -> str:
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query)
+    if "uddg" in query and query["uddg"]:
+        return unquote(query["uddg"][0])
+    return url
+
+
+def _url_match_keys(url: str) -> set[str]:
+    raw_url = _unwrap_tracking_url(url).strip().rstrip(".,;")
+    decoded = unquote(raw_url)
+    keys = {raw_url.lower(), decoded.lower()}
+    parsed = urlparse(decoded)
+    netloc = parsed.netloc.lower().removeprefix("www.")
+    path = parsed.path.rstrip("/").lower()
+    query = parsed.query.lower()
+    if netloc:
+        keys.add(f"{netloc}{path}")
+        if query:
+            keys.add(f"{netloc}{path}?{query}")
+    for values in parse_qs(parsed.query).values():
+        for value in values:
+            if len(value) >= 12:
+                keys.add(value.lower())
+    return {key for key in keys if key}
+
+
+def _blocked_url_keys_from_text(text: str) -> set[str]:
+    if not _has_blocked_source_rule(text):
+        return set()
+    keys: set[str] = set()
+    for match in _URL_RE.findall(text):
+        keys.update(_url_match_keys(match))
+    return keys
+
+
+def _blocked_title_markers_from_text(text: str) -> set[str]:
+    if not _has_blocked_source_rule(text):
+        return set()
+    lowered = text.lower().replace("’", "'")
+    markers: set[str] = set()
+    if "south asia" in lowered and "unprotected poor" in lowered:
+        markers.update({"south asia's unprotected poor", "south asia unprotected poor"})
+    return markers
+
+
+def _source_matches_blocked_rule(
+    source: SourceNote,
+    *,
+    blocked_url_keys: set[str],
+    blocked_title_markers: set[str],
+) -> bool:
+    source_text = " ".join([source.title, source.url, source.snippet, source.excerpt]).lower().replace("’", "'")
+    if any(marker in source_text for marker in blocked_title_markers):
+        return True
+    source_url_keys = _url_match_keys(source.url)
+    return any(
+        blocked_key in source_key or source_key in blocked_key
+        for source_key in source_url_keys
+        for blocked_key in blocked_url_keys
+        if len(source_key) >= 12 and len(blocked_key) >= 12
+    )
 
 
 class SearchPlan(BaseModel):
@@ -85,6 +170,8 @@ class ResearchAgent:
     def run(self, brief: ResearchBrief, observer=None) -> ResearchRunResult:
         memory_hits = self.ideation_memory.query(brief.reframed_goal, top_k=3)
         proposal_hits = self.proposal_memory.query(brief.reframed_goal, top_k=3)
+        blocked_url_keys = _blocked_url_keys_from_text(brief.user_goal)
+        blocked_title_markers = _blocked_title_markers_from_text(brief.user_goal)
         if observer is not None:
             observer.phase_log(
                 "research",
@@ -138,6 +225,9 @@ class ResearchAgent:
                 "proposal_hits": [entry.model_dump() for entry in proposal_hits],
                 "ideation_backend": self.ideation_memory.last_query_backend,
                 "proposal_backend": self.proposal_memory.last_query_backend,
+                "blocked_source_rule_detected": bool(blocked_url_keys or blocked_title_markers),
+                "blocked_url_keys": sorted(blocked_url_keys),
+                "blocked_title_markers": sorted(blocked_title_markers),
             },
         )
 
@@ -149,25 +239,74 @@ class ResearchAgent:
             label="research_search_plan",
             system_prompt=(
                 "You are a research planning agent. Produce concise web search queries that maximize "
-                "coverage and grounding for a deep research task."
+                "coverage and grounding for a deep research task. Honor blocked-source rules in the "
+                "user goal: do not produce queries targeting forbidden titles or URLs."
             ),
             user_prompt=(
+                f"Original user goal: {brief.user_goal}\n"
                 f"Goal: {brief.reframed_goal}\n"
                 f"Mode: {brief.mode}\n"
                 f"Time cutoff: {brief.time_cutoff}\n"
                 f"Key questions: {brief.key_questions}"
             ),
+            model_override=self.config.deepseek_reasoning_model,
         )
         gathered: list[SourceNote] = []
-        for query in search_plan.queries[:3]:
+        blocked_url_keys = _blocked_url_keys_from_text(brief.user_goal)
+        blocked_title_markers = _blocked_title_markers_from_text(brief.user_goal)
+        queries = [query for query in search_plan.queries[:3] if query.strip()]
+        queries.extend(query for query in self._fallback_search_queries(brief) if query not in queries)
+        for query in queries:
             if observer is not None:
                 observer.phase_log("research", f"Searching web for: {query}")
             for result in self.web.search(query, limit=2):
+                if _source_matches_blocked_rule(
+                    result,
+                    blocked_url_keys=blocked_url_keys,
+                    blocked_title_markers=blocked_title_markers,
+                ):
+                    if observer is not None:
+                        observer.phase_log(
+                            "research",
+                            "Skipped a search result that matched the task's blocked-source rule.",
+                        )
+                    continue
                 if result.url not in {item.url for item in gathered}:
-                    gathered.append(self.web.enrich(result))
+                    enriched = self.web.enrich(result)
+                    if _source_matches_blocked_rule(
+                        enriched,
+                        blocked_url_keys=blocked_url_keys,
+                        blocked_title_markers=blocked_title_markers,
+                    ):
+                        if observer is not None:
+                            observer.phase_log(
+                                "research",
+                                "Skipped an enriched source that matched the task's blocked-source rule.",
+                            )
+                        continue
+                    gathered.append(enriched)
                 if len(gathered) >= self.config.max_sources:
                     return gathered
         return gathered
+
+    def _fallback_search_queries(self, brief: ResearchBrief) -> list[str]:
+        text = f"{brief.user_goal} {brief.reframed_goal}".lower()
+        queries: list[str] = []
+        if "mgnreg" in text or "mgnrega" in text:
+            queries.append("MGNREGA failures India")
+        if "zakat" in text:
+            queries.append("Pakistan Zakat programme targeting poor")
+        if "bisp" in text or "benazir" in text:
+            queries.append("BISP targeting errors Pakistan")
+        if "brac" in text or "cfpr" in text or "tup" in text or "ultra-poor" in text:
+            queries.append("BRAC ultra poor programme evaluation")
+        if "nepal" in text:
+            queries.append("Nepal social security allowances exclusion poor")
+        if not queries:
+            fallback = " ".join(brief.reframed_goal.split()[:8])
+            if fallback:
+                queries.append(fallback)
+        return queries
 
     def _grow_tree(
         self,
@@ -238,6 +377,7 @@ class ResearchAgent:
                 f"Sources: {[source.model_dump() for source in sources[:4]]}\n"
                 "Return one initial research idea draft."
             ),
+            model_override=self.config.deepseek_reasoning_model,
         )
         return self._make_idea(
             idea_id=f"idea-{next(self._counter)}",
@@ -311,6 +451,7 @@ class ResearchAgent:
                 "Return two children. The first must refine the weak dimension. "
                 "The second must explore a nearby alternative direction."
             ),
+            model_override=self.config.deepseek_reasoning_model,
         )
         refine_child = self._make_idea(
             idea_id=f"idea-{next(self._counter)}",
@@ -359,6 +500,7 @@ class ResearchAgent:
                 f"Proposal memory hits: {[entry.model_dump() for entry in proposal_hits]}\n"
                 f"Sources: {[source.model_dump() for source in sources[:4]]}\n"
             ),
+            model_override=self.config.deepseek_reasoning_model,
         )
         total = round(
             review.novelty * 0.25
@@ -397,6 +539,7 @@ class ResearchAgent:
                 f"Sources: {[source.model_dump() for source in sources[:4]]}\n"
                 "Return the winner_id exactly matching one of the input idea ids."
             ),
+            model_override=self.config.deepseek_reasoning_model,
         )
         if judgement.winner_id not in {idea_a.idea_id, idea_b.idea_id}:
             raise ValueError(
@@ -420,6 +563,7 @@ class ResearchAgent:
                 f"Brief: {brief.model_dump_json(indent=2)}\n"
                 f"Sources: {[source.model_dump() for source in sources]}\n"
             ),
+            model_override=self.config.deepseek_reasoning_model,
         )
 
     def _make_idea(

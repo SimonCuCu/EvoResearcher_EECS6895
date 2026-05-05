@@ -17,6 +17,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tree-depth", type=int, default=2, help="Idea tree search depth.")
     parser.add_argument("--branching-factor", type=int, default=2, help="Number of children kept per expansion step.")
     parser.add_argument("--max-sources", type=int, default=6, help="Maximum number of retrieved web sources.")
+    parser.add_argument("--model", default=None, help="Override the default model used by intake/proposal/EMA calls.")
+    parser.add_argument("--reasoning-model", default=None, help="Override the model used by research reasoning calls.")
+    parser.add_argument(
+        "--global-model",
+        default=None,
+        help="Override both default and research reasoning models, e.g. deepseek-v4-flash.",
+    )
     parser.add_argument("--no-search", action="store_true")
     parser.add_argument("--print-json", action="store_true")
     return parser
@@ -33,6 +40,8 @@ def main(argv: list[str] | None = None) -> None:
         tree_depth=args.tree_depth,
         branching_factor=args.branching_factor,
         max_sources=args.max_sources,
+        deepseek_model=args.global_model or args.model,
+        deepseek_reasoning_model=args.global_model or args.reasoning_model,
     )
     with RichObserver() as observer:
         result = run_research(

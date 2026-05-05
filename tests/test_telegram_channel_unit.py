@@ -1,13 +1,16 @@
 import pytest
 
 from evoresearcher.channels.telegram import (
+    MODEL_PRESETS,
     TelegramCommandError,
     TelegramConfigError,
     _format_done_message,
     _format_memory_preview,
+    _format_selection_question_text,
     is_authorized,
     parse_allowed_user_ids,
     parse_run_command,
+    resolve_model_preset,
 )
 from evoresearcher.runner import RunResult
 from evoresearcher.schemas import MemoryEntry
@@ -56,6 +59,15 @@ def test_parse_run_command_rejects_missing_goal():
         parse_run_command("/run ml")
 
 
+def test_flash_model_preset_overrides_all_model_routes():
+    preset = resolve_model_preset("flash")
+
+    assert preset is not None
+    assert preset.deepseek_model == "deepseek-v4-flash"
+    assert preset.deepseek_reasoning_model == "deepseek-v4-flash"
+    assert any(item.preset_id == "env" for item in MODEL_PRESETS)
+
+
 def test_format_memory_preview_includes_example_memory():
     entry = MemoryEntry(
         entry_id="m1",
@@ -77,6 +89,22 @@ def test_format_memory_preview_includes_example_memory():
     assert "Sparse KAN proposal" in message
     assert "adaptive sparse spline grids" in message
     assert "Next I will use these memories" in message
+
+
+def test_selection_question_text_omits_internal_guidance_labels():
+    message = _format_selection_question_text(
+        prompt="Which direction should anchor the final report?",
+        question_index=1,
+        total_questions=2,
+        selected_answers=["Candidate preference: idea-2"],
+    )
+
+    assert message.startswith("Question 1/2")
+    assert "Which direction should anchor the final report?" in message
+    assert "Already selected" in message
+    assert "Human guidance" not in message
+    assert "Human Guidance" not in message
+    assert "ML setup" not in message
 
 
 def test_format_done_message_explains_pdf_fallback(tmp_path):

@@ -28,7 +28,9 @@ class LLMClient:
         system_prompt: str,
         user_prompt: str,
         temperature: float = 0.2,
+        model_override: str | None = None,
     ) -> str:
+        model_name = model_override or self.config.deepseek_model
         response = self._client.post(
             self.config.deepseek_base_url,
             headers={
@@ -36,7 +38,7 @@ class LLMClient:
                 "Content-Type": "application/json",
             },
             json={
-                "model": self.config.deepseek_model,
+                "model": model_name,
                 "temperature": temperature,
                 "messages": [
                     {"role": "system", "content": system_prompt},
@@ -56,6 +58,7 @@ class LLMClient:
         system_prompt: str,
         user_prompt: str,
         temperature: float = 0.2,
+        model_override: str | None = None,
     ) -> T:
         schema = json.dumps(model.model_json_schema(), indent=2)
         prompt = (
@@ -69,6 +72,7 @@ class LLMClient:
             system_prompt=system_prompt,
             user_prompt=prompt,
             temperature=temperature,
+            model_override=model_override,
         )
         try:
             data = self._extract_json(raw)
@@ -78,6 +82,7 @@ class LLMClient:
                 label=label,
                 schema=schema,
                 raw=raw,
+                model_override=model_override,
             )
             try:
                 data = self._extract_json(repaired)
@@ -103,7 +108,14 @@ class LLMClient:
     def _escape_invalid_backslashes(self, json_text: str) -> str:
         return re.sub(r'\\(?!["\\/bfnrtu])', r"\\\\", json_text)
 
-    def _repair_json_with_model(self, *, label: str, schema: str, raw: str) -> str:
+    def _repair_json_with_model(
+        self,
+        *,
+        label: str,
+        schema: str,
+        raw: str,
+        model_override: str | None = None,
+    ) -> str:
         return self.text(
             label=f"{label}_json_repair",
             system_prompt=(
@@ -118,6 +130,7 @@ class LLMClient:
                 "Return the repaired JSON object only."
             ),
             temperature=0.0,
+            model_override=model_override,
         )
 
     def _write_invalid_json(self, *, label: str, raw: str) -> None:

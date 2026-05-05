@@ -7,7 +7,11 @@ from evoresearcher.schemas import ConstraintProfile, ResearchBrief
 
 
 class FakeLLM:
-    def structured(self, model, *, label, system_prompt, user_prompt, temperature=0.2):
+    def __init__(self):
+        self.calls = []
+
+    def structured(self, model, *, label, system_prompt, user_prompt, temperature=0.2, model_override=None):
+        self.calls.append((label, model_override))
         name = model.__name__
         if name == "RootIdea":
             return model(
@@ -106,9 +110,10 @@ def test_review_guided_tree_uses_feedback_structure(tmp_path: Path):
         time_cutoff="as of September 2023",
         constraints=ConstraintProfile(),
     )
+    llm = FakeLLM()
     agent = ResearchAgent(
         config,
-        FakeLLM(),
+        llm,
         JSONMemoryStore(config.memory_dir / "ideation.json"),
         JSONMemoryStore(config.memory_dir / "proposal.json"),
     )
@@ -121,3 +126,5 @@ def test_review_guided_tree_uses_feedback_structure(tmp_path: Path):
     child_relations = {idea.relation_to_parent for idea in result.leaf_ideas}
     assert child_relations == {"refine_weak_dimension", "alternative_direction"}
     assert result.ranked_ideas[0].title == "Clarified Budget-Aware Routing"
+    assert llm.calls
+    assert all(model_override == "deepseek-v4-pro" for _, model_override in llm.calls)

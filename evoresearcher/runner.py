@@ -25,6 +25,8 @@ class RunOptions:
     tree_depth: int = 2
     branching_factor: int = 2
     max_sources: int = 6
+    deepseek_model: str | None = None
+    deepseek_reasoning_model: str | None = None
 
 
 @dataclass(slots=True)
@@ -54,6 +56,8 @@ def run_research(
         tree_depth=opts.tree_depth,
         branching_factor=opts.branching_factor,
         max_sources=opts.max_sources,
+        deepseek_model=opts.deepseek_model,
+        deepseek_reasoning_model=opts.deepseek_reasoning_model,
     )
     run_id = config.make_run_id(goal)
     run_dir = config.outputs_dir / run_id
@@ -75,7 +79,7 @@ def run_research(
             run_id=run_id,
             mode=mode,
             goal=goal,
-            model_name=config.deepseek_model,
+            model_name=f"{config.deepseek_model} (research reasoning: {config.deepseek_reasoning_model})",
             provider="deepseek",
             workspace_dir=config.workspace_dir,
         )
@@ -88,14 +92,37 @@ def run_research(
         ema_agent=ema_agent,
         observer=observer,
     )
+    model_routing = {
+        "provider": "deepseek",
+        "default_model": config.deepseek_model,
+        "research_reasoning_model": config.deepseek_reasoning_model,
+        "research_reasoning_labels": [
+            "research_search_plan",
+            "research_root_idea",
+            "research_expansion_depth_*",
+            "research_review_*",
+            "elo_judge_*",
+            "research_evidence_synthesis",
+        ],
+        "default_model_labels": [
+            "intake_*",
+            "ml_intake_*",
+            "proposal_sections",
+        ],
+    }
     state = app.invoke(
         {
             "run_id": run_id,
             "run_dir": str(run_dir),
             "mode": mode,
             "goal": goal,
+            "model_routing": model_routing,
         }
     )
+    state["model_routing"] = model_routing
+    model_routing_path = run_dir / "model_routing.json"
+    model_routing_path.write_text(json.dumps(model_routing, indent=2))
+    state.setdefault("artifacts", {})["model_routing_path"] = str(model_routing_path)
     (run_dir / "run_summary.json").write_text(json.dumps(state, indent=2))
     if observer is not None and hasattr(observer, "artifact"):
         observer.artifact("run_summary", run_dir / "run_summary.json")

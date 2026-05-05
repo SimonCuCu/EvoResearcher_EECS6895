@@ -20,7 +20,7 @@ from evoresearcher.runner import RunOptions, RunResult, run_research
 from evoresearcher.schemas import MemoryEntry, ModeName, ReportSections, ResearchIdea
 
 
-COMMANDS = """Use /start to choose a task type.
+COMMANDS = """Use /start to choose a task type and model profile.
 
 While a run is active, you can also use:
 /status
@@ -30,6 +30,7 @@ While a run is active, you can also use:
 MODE_CALLBACK_PREFIX = "mode:"
 ML_CALLBACK_PREFIX = "ml:"
 ML_CUSTOM_CALLBACK_PREFIX = "mlc:"
+MODEL_CALLBACK_PREFIX = "model:"
 
 
 class TelegramConfigError(RuntimeError):
@@ -52,9 +53,47 @@ class TelegramSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class ModelPreset:
+    preset_id: str
+    label: str
+    description: str
+    deepseek_model: str | None = None
+    deepseek_reasoning_model: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class RunCommand:
     mode: ModeName
     goal: str
+    deepseek_model: str | None = None
+    deepseek_reasoning_model: str | None = None
+    model_label: str = "Default (.env)"
+
+
+MODEL_PRESETS = (
+    ModelPreset(
+        preset_id="env",
+        label="Default (.env)",
+        description="Use DEEPSEEK_MODEL and DEEPSEEK_REASONING_MODEL from .env.",
+    ),
+    ModelPreset(
+        preset_id="flash",
+        label="Flash",
+        description="Use deepseek-v4-flash for every LLM call.",
+        deepseek_model="deepseek-v4-flash",
+        deepseek_reasoning_model="deepseek-v4-flash",
+    ),
+    ModelPreset(
+        preset_id="pro-reasoning",
+        label="Pro reasoning",
+        description="Use default model for intake/proposal and deepseek-v4-pro for research reasoning.",
+        deepseek_reasoning_model="deepseek-v4-pro",
+    ),
+)
+
+
+def resolve_model_preset(preset_id: str) -> ModelPreset | None:
+    return next((preset for preset in MODEL_PRESETS if preset.preset_id == preset_id), None)
 
 
 @dataclass(slots=True)
@@ -270,6 +309,7 @@ class TelegramResearchBot:
         self.last_runs: dict[int, RunResult] = {}
         self.status_by_chat: dict[int, str] = {}
         self.pending_mode_by_chat: dict[int, ModeName] = {}
+        self.pending_model_by_chat: dict[int, ModelPreset] = {}
         self.selection_waiters: dict[int, PendingSelection] = {}
         self.custom_selection_by_chat: dict[int, int] = {}
         self._selection_ids = count(1)
@@ -315,9 +355,21 @@ class TelegramResearchBot:
             )
             await self._ask_for_mode(update.effective_message)
             return
+        model_preset = self.pending_model_by_chat.get(chat_id)
+        if model_preset is None:
+            await update.effective_message.reply_text("Choose the model profile before sending the goal.")
+            await self._ask_for_model(update.effective_message)
+            return
 
         self.pending_mode_by_chat.pop(chat_id, None)
-        await self._start_run(chat_id=chat_id, mode=mode, goal=text, bot=context.bot)
+        self.pending_model_by_chat.pop(chat_id, None)
+        await self._start_run(
+            chat_id=chat_id,
+            mode=mode,
+            goal=text,
+            bot=context.bot,
+            model_preset=model_preset,
+        )
 
     async def status(self, update, context) -> None:
         if not await self._ensure_authorized(update):
@@ -329,7 +381,10 @@ class TelegramResearchBot:
             )
             return
         if chat_id in self.pending_mode_by_chat:
-            await update.effective_message.reply_text("I am waiting for your research goal.")
+            if chat_id not in self.pending_model_by_chat:
+                await update.effective_message.reply_text("I am waiting for your model profile choice.")
+            else:
+                await update.effective_message.reply_text("I am waiting for your research goal.")
             return
         await update.effective_message.reply_text("No active run. Use /start to begin.")
 
@@ -354,6 +409,7 @@ class TelegramResearchBot:
             return
         if chat_id not in self.active_tasks:
             self.pending_mode_by_chat.pop(chat_id, None)
+            self.pending_model_by_chat.pop(chat_id, None)
             await update.effective_message.reply_text("No active run. Use /start to begin again.")
             return
         await update.effective_message.reply_text(
@@ -364,7 +420,9 @@ class TelegramResearchBot:
     async def unknown(self, update, context) -> None:
         if not await self._ensure_authorized(update):
             return
-        await update.effective_message.reply_text("I do not need commands for goals. Use /start, choose a type, then type your goal.")
+        await update.effective_message.reply_text(
+            "I do not need commands for goals. Use /start, choose a type and model, then type your goal."
+        )
 
     async def handle_callback(self, update, context) -> None:
         if not await self._ensure_authorized(update):
@@ -376,6 +434,9 @@ class TelegramResearchBot:
         data = query.data or ""
         if data.startswith(MODE_CALLBACK_PREFIX):
             await self._handle_mode_callback(query, data)
+            return
+        if data.startswith(MODEL_CALLBACK_PREFIX):
+            await self._handle_model_callback(query, data)
             return
         if data.startswith(ML_CUSTOM_CALLBACK_PREFIX):
             await self._handle_ml_custom_callback(query, data)
@@ -459,15 +520,74 @@ class TelegramResearchBot:
             await query.edit_message_text("I am already working on a run for this chat. Use /status for progress.")
             return
         self.pending_mode_by_chat[chat_id] = mode
-        await query.edit_message_text(f"Great. We will work in {mode} mode. How can I help you?")
+        self.pending_model_by_chat.pop(chat_id, None)
+        await query.edit_message_text(
+            f"Great. We will work in {mode} mode. Now choose the model profile.",
+            reply_markup=self._model_keyboard(),
+        )
 
-    async def _start_run(self, *, chat_id: int, mode: ModeName, goal: str, bot) -> None:
+    async def _ask_for_model(self, message) -> None:
+        await message.reply_text("Which model profile should I use?", reply_markup=self._model_keyboard())
+
+    def _model_keyboard(self):
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+        return InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton(preset.label, callback_data=f"{MODEL_CALLBACK_PREFIX}{preset.preset_id}")]
+                for preset in MODEL_PRESETS
+            ]
+        )
+
+    async def _handle_model_callback(self, query, data: str) -> None:
+        chat_id = query.message.chat_id
+        if chat_id in self.active_tasks:
+            await query.edit_message_text("I am already working on a run for this chat. Use /status for progress.")
+            return
+        if chat_id not in self.pending_mode_by_chat:
+            await query.edit_message_text("Choose the task type first. Use /start to begin again.")
+            return
+        preset_id = data[len(MODEL_CALLBACK_PREFIX) :]
+        preset = resolve_model_preset(preset_id)
+        if preset is None:
+            await query.edit_message_text("That model profile is not supported. Use /start to choose again.")
+            return
+        self.pending_model_by_chat[chat_id] = preset
+        await query.edit_message_text(
+            f"Great. I will use {preset.label}.\n\n{preset.description}\n\nHow can I help you?"
+        )
+
+    async def _start_run(
+        self,
+        *,
+        chat_id: int,
+        mode: ModeName,
+        goal: str,
+        bot,
+        model_preset: ModelPreset,
+    ) -> None:
         await bot.send_message(
             chat_id=chat_id,
-            text="Got it. I will turn that into a research brief and report back as the pipeline makes progress.",
+            text=(
+                "Got it. I will turn that into a research brief and report back as the pipeline makes progress.\n\n"
+                f"Model profile: {model_preset.label}"
+            ),
         )
         loop = asyncio.get_running_loop()
-        task = asyncio.create_task(self._run_job(chat_id, RunCommand(mode=mode, goal=goal), bot, loop))
+        task = asyncio.create_task(
+            self._run_job(
+                chat_id,
+                RunCommand(
+                    mode=mode,
+                    goal=goal,
+                    deepseek_model=model_preset.deepseek_model,
+                    deepseek_reasoning_model=model_preset.deepseek_reasoning_model,
+                    model_label=model_preset.label,
+                ),
+                bot,
+                loop,
+            )
+        )
         self.active_tasks[chat_id] = task
         task.add_done_callback(lambda finished: self.active_tasks.pop(chat_id, None))
 
@@ -490,6 +610,8 @@ class TelegramResearchBot:
             tree_depth=self.settings.tree_depth,
             branching_factor=self.settings.branching_factor,
             max_sources=self.settings.max_sources,
+            deepseek_model=command.deepseek_model,
+            deepseek_reasoning_model=command.deepseek_reasoning_model,
         )
         try:
             result = await asyncio.to_thread(
@@ -537,18 +659,14 @@ class TelegramResearchBot:
             label = str(option.get("label") or option.get("value") or f"Option {idx + 1}")
             rows.append([InlineKeyboardButton(label[:48], callback_data=f"{ML_CALLBACK_PREFIX}{request_id}:{idx}")])
         rows.append([InlineKeyboardButton("Custom answer", callback_data=f"{ML_CUSTOM_CALLBACK_PREFIX}{request_id}")])
-        context = ""
-        if selected_answers:
-            context = "\n\nAlready set:\n" + "\n".join(f"- {answer}" for answer in selected_answers[-3:])
         await bot.send_message(
             chat_id=chat_id,
-            text=(
-                f"ML setup question {question_index}/{total_questions}\n\n"
-                f"{title}\n\n"
-                f"{prompt}"
-                f"{context}\n\n"
-                f"Tap an option, or choose custom to type your own answer."
-            )[:3900],
+            text=_format_selection_question_text(
+                prompt=prompt,
+                question_index=question_index,
+                total_questions=total_questions,
+                selected_answers=selected_answers,
+            ),
             reply_markup=InlineKeyboardMarkup(rows),
         )
 
@@ -588,7 +706,7 @@ class TelegramResearchBot:
             await query.edit_message_text("That question has expired.")
             return
         self.custom_selection_by_chat[pending.chat_id] = request_id
-        await query.edit_message_text(f"Custom answer for: {pending.title}")
+        await query.edit_message_text("Custom answer")
         await query.message.reply_text("Type your custom answer in the next message.")
 
     async def _maybe_accept_custom_selection(self, update, text: str) -> bool:
@@ -599,7 +717,7 @@ class TelegramResearchBot:
         pending = self.selection_waiters.get(request_id)
         if pending is None:
             self.custom_selection_by_chat.pop(chat_id, None)
-            await update.effective_message.reply_text("That ML question has expired. Please wait for the next prompt.")
+            await update.effective_message.reply_text("That question has expired. Please wait for the next prompt.")
             return True
         if not pending.future.done():
             pending.future.set_result(text)
@@ -669,6 +787,24 @@ def _natural_phase_message(phase: str, detail: str) -> str:
     if phase == "memory":
         return "I am saving what this run learned into EvoResearcher's memory."
     return detail
+
+
+def _format_selection_question_text(
+    *,
+    prompt: str,
+    question_index: int,
+    total_questions: int,
+    selected_answers: list[str],
+) -> str:
+    context = ""
+    if selected_answers:
+        context = "\n\nAlready selected:\n" + "\n".join(f"- {answer}" for answer in selected_answers[-3:])
+    return (
+        f"Question {question_index}/{total_questions}\n\n"
+        f"{prompt}"
+        f"{context}\n\n"
+        f"Tap an option, or choose custom to type your own answer."
+    )[:3900]
 
 
 def _format_memory_preview(

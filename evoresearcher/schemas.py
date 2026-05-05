@@ -27,6 +27,10 @@ class ResearchBrief(BaseModel):
     time_cutoff: str
     key_questions: list[str] = Field(default_factory=list)
     constraints: ConstraintProfile = Field(default_factory=ConstraintProfile)
+    human_clarifications: list[str] = Field(default_factory=list)
+    preferred_idea_id: str = ""
+    human_idea_feedback: str = ""
+    report_emphasis: str = ""
 
 
 class SourceNote(BaseModel):
@@ -110,3 +114,4 @@ class GraphState(TypedDict, total=False):
     report: dict
     artifacts: dict
     memory_updates: dict
+    model_routing: dict

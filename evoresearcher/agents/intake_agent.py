@@ -42,6 +42,16 @@ class MLIntakeQuestionnaire(BaseModel):
     questions: list[MLIntakeQuestion] = Field(default_factory=list)
 
 
+class ClarifyingQuestion(BaseModel):
+    title: str
+    prompt: str
+    options: list[MLIntakeOption] = Field(default_factory=list)
+
+
+class ClarifyingQuestionnaire(BaseModel):
+    questions: list[ClarifyingQuestion] = Field(default_factory=list)
+
+
 class IntakeAgent:
     def __init__(self, llm: LLMClient):
         self.llm = llm
@@ -51,6 +61,14 @@ class IntakeAgent:
         constraints = ConstraintProfile()
         if mode == "ml":
             constraints = self._collect_ml_constraints(observer=observer)
+        human_clarifications: list[str] = []
+        if self._should_collect_clarifications(goal):
+            human_clarifications = self._collect_clarifications(
+                goal=goal,
+                mode=mode,
+                constraints=constraints,
+                observer=observer,
+            )
         if observer is not None:
             observer.phase_log("intake", "Normalizing goal into a structured research brief.")
         normalized = self.llm.structured(
@@ -64,6 +82,7 @@ class IntakeAgent:
                 f"Mode: {mode}\n"
                 f"User goal: {goal}\n"
                 f"Constraints: {constraints.model_dump_json(indent=2)}\n"
+                f"Human clarifications: {human_clarifications}\n"
                 "Preserve any explicit time cutoff such as 'as of September 2023'."
             ),
         )
@@ -76,7 +95,102 @@ class IntakeAgent:
             time_cutoff=normalized.time_cutoff,
             key_questions=normalized.key_questions,
             constraints=constraints,
+            human_clarifications=human_clarifications,
         )
+
+    def _should_collect_clarifications(self, goal: str) -> bool:
+        lowered = goal.lower()
+        triggers = [
+            "ask me clarifying",
+            "ask clarifying",
+            "clarifying question",
+            "clarification question",
+            "先问",
+            "澄清问题",
+            "先澄清",
+        ]
+        return any(trigger in lowered for trigger in triggers)
+
+    def _collect_clarifications(
+        self,
+        *,
+        goal: str,
+        mode: str,
+        constraints: ConstraintProfile,
+        observer=None,
+    ) -> list[str]:
+        if observer is not None:
+            observer.phase_log("intake", "Generating clarifying questions before normalizing the brief.")
+        questionnaire = self.llm.structured(
+            ClarifyingQuestionnaire,
+            label="intake_clarifying_questionnaire",
+            system_prompt=(
+                "You are the human-in-the-loop intake designer for EvoResearcher. Generate two or three "
+                "high-impact clarification questions. Each answer must materially change scope, evidence "
+                "selection, feasibility constraints, or report emphasis."
+            ),
+            user_prompt=(
+                f"Mode: {mode}\n"
+                f"User goal: {goal}\n"
+                f"Existing constraints: {constraints.model_dump_json(indent=2)}\n\n"
+                "Return 2-3 questions. Each question must have exactly 3 concise predefined options. "
+                "Do not include a custom option; the UI adds it."
+            ),
+        )
+        questions = self._normalize_clarifying_questions(questionnaire)
+        answers: list[str] = []
+        for idx, question in enumerate(questions, start=1):
+            title = f"Clarification Q{idx}: {question.title}"
+            if observer is not None and hasattr(observer, "select_option"):
+                answer = observer.select_option(
+                    title=title,
+                    prompt=question.prompt,
+                    options=[option.model_dump() for option in question.options],
+                    custom_prompt="Type your clarification.",
+                    question_index=idx,
+                    total_questions=len(questions),
+                    selected_answers=answers,
+                )
+            else:
+                answer = self._fallback_clarifying_prompt(question, title)
+            answers.append(f"{question.title}: {answer}")
+        return answers
+
+    def _normalize_clarifying_questions(
+        self,
+        questionnaire: ClarifyingQuestionnaire,
+    ) -> list[ClarifyingQuestion]:
+        questions = questionnaire.questions[:3]
+        if len(questions) < 2:
+            raise ValueError("Clarifying questionnaire returned too few questions.")
+        normalized: list[ClarifyingQuestion] = []
+        for idx, question in enumerate(questions, start=1):
+            options = question.options[:3]
+            if len(options) < 2:
+                raise ValueError(f"Clarifying question {idx} returned too few options.")
+            normalized.append(question.model_copy(update={"options": options}))
+        return normalized
+
+    def _fallback_clarifying_prompt(self, question: ClarifyingQuestion, title: str) -> str:
+        options = list(question.options)
+        options.append(
+            MLIntakeOption(
+                label="Custom",
+                value="__custom__",
+                description="Type your own answer.",
+            )
+        )
+        display = "\n".join(
+            [f"{idx}. {option.label} - {option.description}" for idx, option in enumerate(options, start=1)]
+        )
+        choice = Prompt.ask(f"[bold cyan]{title}[/bold cyan]\n{question.prompt}\n{display}", default="1")
+        try:
+            selected = options[max(0, min(len(options) - 1, int(choice) - 1))]
+        except ValueError:
+            selected = options[-1]
+        if selected.value == "__custom__":
+            return Prompt.ask("Type your clarification", default="")
+        return selected.value
 
     def _collect_ml_constraints(self, observer=None) -> ConstraintProfile:
         if observer is not None:
