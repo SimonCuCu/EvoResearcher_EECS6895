@@ -20,9 +20,13 @@ dependencies = [
 dev = [
     "pytest>=8.0",
 ]
+telegram = [
+    "python-telegram-bot>=21,<22",
+]
 
 [project.scripts]
 evoresearcher = "evoresearcher.main:main"
+evoresearcher-telegram = "evoresearcher.channels.telegram:main"
 
 [build-system]
 requires = ["setuptools>=68"]

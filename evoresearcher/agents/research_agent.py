@@ -93,6 +93,13 @@ class ResearchAgent:
                 f"and {len(proposal_hits)} proposal memories ({self.proposal_memory.last_query_backend}).",
             )
             observer.metric("memory_hits", len(memory_hits) + len(proposal_hits))
+            if hasattr(observer, "memories_ready"):
+                observer.memories_ready(
+                    memory_hits=memory_hits,
+                    proposal_hits=proposal_hits,
+                    ideation_backend=self.ideation_memory.last_query_backend,
+                    proposal_backend=self.proposal_memory.last_query_backend,
+                )
         sources = self._collect_sources(brief=brief, observer=observer)
         idea_tree, leaf_ideas = self._grow_tree(
             brief=brief,
@@ -184,6 +191,8 @@ class ResearchAgent:
             memory_hits=memory_hits,
             proposal_hits=proposal_hits,
         )
+        if observer is not None and hasattr(observer, "candidate_ideas_ready"):
+            observer.candidate_ideas_ready([root_idea], stage="initial candidate")
         nodes, leaves = build_tree(
             [root_idea],
             depth=self.config.tree_depth,
@@ -200,6 +209,11 @@ class ResearchAgent:
             layer_count = sum(1 for node in nodes if node.depth == depth)
             if observer is not None:
                 observer.phase_log("research", f"Expanded tree depth {depth} with {layer_count} nodes.")
+                if hasattr(observer, "candidate_ideas_ready"):
+                    observer.candidate_ideas_ready(
+                        [node for node in nodes if node.depth == depth],
+                        stage=f"depth {depth} candidates",
+                    )
         return nodes, leaves
 
     def _build_root_idea(

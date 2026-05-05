@@ -26,14 +26,21 @@ def render_outputs(
     normalized_report = _normalize_report_sections(report)
     tex_path.write_text(_build_latex(brief=brief, report=normalized_report, author_line=author_line))
     md_path.write_text(_build_markdown(brief=brief, report=report))
-    _compile_pdf(tex_path=tex_path, pdf_path=pdf_path)
-    (run_dir / "sources.json").write_text(json.dumps(sources, indent=2))
-    (run_dir / "top_ideas.json").write_text(json.dumps(top_ideas, indent=2))
-    return {
+    artifacts = {
         "tex_path": str(tex_path),
         "markdown_path": str(md_path),
-        "pdf_path": str(pdf_path),
     }
+    try:
+        _compile_pdf(tex_path=tex_path, pdf_path=pdf_path)
+    except RuntimeError as exc:
+        warning_path = run_dir / "pdf_render_warning.txt"
+        warning_path.write_text(str(exc))
+        artifacts["pdf_warning_path"] = str(warning_path)
+    else:
+        artifacts["pdf_path"] = str(pdf_path)
+    (run_dir / "sources.json").write_text(json.dumps(sources, indent=2))
+    (run_dir / "top_ideas.json").write_text(json.dumps(top_ideas, indent=2))
+    return artifacts
 
 
 def _escape_latex(text: str) -> str:

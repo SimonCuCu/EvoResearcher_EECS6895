@@ -59,6 +59,8 @@ def build_graph(
         top_ideas = _select_unique_top_ideas(result.ranked_ideas, limit=3)
         if observer is not None:
             observer.agent_state("research", "done", f"{len(result.idea_tree)} nodes, {len(result.elo_matches)} Elo matches")
+            if hasattr(observer, "ideas_ready"):
+                observer.ideas_ready(top_ideas)
         return {
             "sources": [item.model_dump() for item in result.sources],
             "memory_context": result.memory_context,
@@ -85,6 +87,8 @@ def build_graph(
         )
         if observer is not None:
             observer.agent_state("proposal", "done", "report sections ready")
+            if hasattr(observer, "report_ready"):
+                observer.report_ready(report)
         return {"report": report.model_dump()}
 
     def publish_node(state: GraphState) -> GraphState:

@@ -48,7 +48,7 @@ def load_config(
     branching_factor: int | None = None,
     max_sources: int | None = None,
 ) -> AppConfig:
-    load_dotenv()
+    load_dotenv(Path.cwd() / ".env")
     root = Path(workspace_dir or Path.cwd()).resolve()
     outputs_dir = root / "outputs"
     memory_dir = root / "memory"

@@ -9,6 +9,8 @@ __pycache__/
 
 # Local runtime state
 memory/*.json
+outputs/20*/
+outputs/_llm_failures/
 demo_workspace/
 live_fast_workspace/
 live_manual_workspace/
