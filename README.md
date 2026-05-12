@@ -1,28 +1,50 @@
 # EvoResearcher
 
-EvoResearcher is an interactive deep-research proposal system with:
+EvoResearcher is an interactive deep-research proposal system. It uses LangGraph orchestration, DeepSeek models, dual JSON memory, tree-search ideation, and report generation to turn a research goal into ranked ideas and a concise PDF/Markdown report.
 
-- Rich TUI with animated live phases
-- LangGraph orchestration
-- DeepSeek API as the model backend
-- Dual memory plus an Evolution Memory Agent (EMA)
-- Tree-search based ideation
-- LaTeX report generation and direct PDF rendering
+## System Structure
 
-## Quick start
-
-```bash
-python -m evoresearcher.main --mode general
-python -m evoresearcher.main --mode ml
-python -m evoresearcher.main --mode general --goal "Investigate why social protection programs in South Asia often fail the ultra-poor as of September 2023."
-python -m evoresearcher.main --mode general --global-model deepseek-v4-flash --goal "Draft a fast evidence scan."
+```mermaid
+flowchart TD
+    User[User goal] --> CLI[CLI / Rich TUI]
+    User --> TG[Telegram channel]
+    CLI --> Runner[Run orchestration]
+    TG --> Runner
+    Runner --> Graph[LangGraph pipeline]
+    Graph --> Intake[Intake agent]
+    Graph --> Research[Research agent]
+    Graph --> Proposal[Proposal agent]
+    Graph --> EMA[Evolution Memory Agent]
+    Research --> Search[Source retrieval]
+    Research --> Tree[Idea tree search + ELO ranking]
+    EMA <--> Memory[Ideation + proposal memory]
+    Proposal --> Report[Markdown / LaTeX / PDF report]
+    Graph --> Outputs[outputs/run-id artifacts]
 ```
 
-Outputs are written under `outputs/<run-id>/`.
+![Architecture](architecture.png)
 
-## Environment
+Key modules:
 
-Create `.env` with:
+- `evoresearcher/main.py`: CLI entrypoint.
+- `evoresearcher/runner.py`: reusable run orchestration.
+- `evoresearcher/orchestration/graph.py`: LangGraph workflow.
+- `evoresearcher/agents/`: intake, research, proposal, and memory agents.
+- `evoresearcher/research/`: tree search and ELO tournament logic.
+- `evoresearcher/report/`: report rendering.
+- `evoresearcher/channels/telegram.py`: optional Telegram bot channel.
+
+## Setup
+
+Requires Python 3.11+.
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e '.[dev]'
+```
+
+Create `.env`:
 
 ```bash
 DEEPSEEK_API_KEY=...
@@ -31,12 +53,10 @@ DEEPSEEK_REASONING_MODEL=deepseek-v4-pro
 DEEPSEEK_BASE_URL=https://api.deepseek.com/chat/completions
 ```
 
-## Telegram channel
-
-Install the optional dependency and add Telegram settings to `.env`:
+Optional Telegram support:
 
 ```bash
-pip install '.[telegram]'
+pip install -e '.[telegram]'
 ```
 
 ```bash
@@ -44,33 +64,56 @@ TELEGRAM_BOT_TOKEN=...
 TELEGRAM_ALLOWED_USER_IDS=123456789
 ```
 
-Then start the long-polling bot:
+## How to Run
+
+Run from the CLI:
+
+```bash
+evoresearcher --mode general --goal "Investigate why social protection programs in South Asia often fail the ultra-poor."
+```
+
+Equivalent module form:
+
+```bash
+python -m evoresearcher.main --mode ml --goal "Design a robust benchmark for long-context retrieval agents."
+```
+
+Start the Telegram bot:
 
 ```bash
 evoresearcher-telegram
 ```
 
-In Telegram, send `/start`, choose `General research` or `ML research`, then type the goal as a normal message. For ML runs, the bot will ask the intake questions with selectable Telegram buttons and an optional custom answer.
+Outputs are written to `outputs/<run-id>/`, including `research_report.md`, `research_report.tex`, `research_report.pdf`, `top_ideas.json`, `idea_tree.json`, `sources.json`, and `run_summary.json`.
 
-Telegram also asks for a model profile before the goal:
+## Example Usage
 
-- `Default (.env)`: use `DEEPSEEK_MODEL` and `DEEPSEEK_REASONING_MODEL`.
-- `Flash`: use `deepseek-v4-flash` globally for intake, research reasoning, proposal, and memory updates.
-- `Pro reasoning`: use the default model for intake/proposal and `deepseek-v4-pro` for research reasoning.
+General research:
 
-The Telegram bot and TUI both support lightweight human-in-the-loop guidance:
-
-- Add phrases like `ask me clarifying questions before...` to your goal to make the agent generate 2-3 clarification questions before building the brief.
-- After candidate ideas are ranked, choose the direction that should anchor the final report.
-- Before report writing, choose the emphasis: novelty, feasibility, evidence, risks, or a custom instruction.
-
-Utility commands:
-
-```text
-/status
-/last
-/cancel
-/help
+```bash
+evoresearcher --mode general --goal "Map the main causes of urban heat inequality and propose interventions."
 ```
 
-`/cancel` is intentionally not destructive in this MVP because the current research pipeline is a synchronous long-running job. Add cooperative cancellation to the graph before enabling hard interruption.
+ML research:
+
+```bash
+evoresearcher --mode ml --goal "Propose a method for evaluating hallucination in multimodal assistants."
+```
+
+Fast model override:
+
+```bash
+evoresearcher --mode general --global-model deepseek-v4-flash --goal "Draft a fast evidence scan on AI tutor effectiveness."
+```
+
+Disable web retrieval:
+
+```bash
+evoresearcher --mode general --no-search --goal "Generate research directions for memory-augmented agents."
+```
+
+Run tests:
+
+```bash
+pytest
+```
